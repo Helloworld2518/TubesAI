@@ -12,7 +12,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 # Configurasi
 
-OLLAMA_MODEL = "llama3.2"
+OLLAMA_MODEL = "qwen2.5"
 DB_PATH = "dummy_ecommerce.db"
 SQL_FILE_PATH = "test_code.sql"
 
