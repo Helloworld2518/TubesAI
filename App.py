@@ -224,9 +224,8 @@ def execute_db_ddl(ddl_statement: str) -> dict:
     }
 
 
-# ==============================================================================
 # 3. INPUT GUARDRAIL
-# ==============================================================================
+
 def input_guardrail(sql_query: str) -> tuple[bool, str]:
     cleaned = sql_query.strip().upper()
     forbidden = ["DROP ", "DELETE ", "TRUNCATE ", "ALTER ", "UPDATE ", "INSERT "]
@@ -312,7 +311,7 @@ def supervisor_node(state: AgentState) -> dict:
     except Exception:
         chosen = expected_next
 
-    print(f"\n🧭 [SUPERVISOR ROUTING - Step {step}] -> Mengarahkan ke: {chosen}")
+    print(f"\n [SUPERVISOR ROUTING - Step {step}] -> Mengarahkan ke: {chosen}")
     return {"next_worker": chosen, "step_count": step}
 
 
@@ -382,18 +381,28 @@ def query_parser_worker(state: AgentState) -> dict:
     sort_dir = (order_match.group(3) or "ASC").upper() if order_match else "ASC"
 
 
+    """
+    SIKLUS 1: Analisis EXPLAIN Plan & Profiling
 
-    print("\n" + "=" * 75)
+    THOUGHT 1: Target awal adalah menganalisis slow query log. Saya harus mengeksekusi tool pengambil EXPLAIN plan untuk melihat letak bottleneck pada database.
+
+    ACTION 1: 
+    ExecuteTool(Tool="get_explain_plan", Input="SELECT * FROM orders WHERE customer_id = 1042 ORDER BY created_at DESC;")
+
+    OBSERVATION 1: 
+    Sequential Scan terdeteksi pada tabel orders (1.000.000 baris, waktu eksekusi: 4.2 detik).
+
+    """
+
     print("SIKLUS 1: Analisis EXPLAIN Plan & Profiling (Query Parser Worker)")
-    print("=" * 75)
-    print('🧠 THOUGHT 1:\n"Target awal adalah menganalisis slow query log. Saya harus mengeksekusi tool pengambil EXPLAIN plan untuk melihat letak bottleneck pada database."')
-    print(f'\n🛠️ ACTION 1:\nExecuteTool(Tool="get_explain_plan", Input="{sql}")')
+    print(' THOUGHT 1:\n"Target awal adalah menganalisis slow query log. Saya harus mengeksekusi tool pengambil EXPLAIN plan untuk melihat letak bottleneck pada database."')
+    print(f'\n ACTION 1:\nExecuteTool(Tool="get_explain_plan", Input="{sql}")')
 
     plan_result = get_explain_plan(sql, main_table=table_name)
 
     join_info = f" + JOIN {join_table} (FK: {fk_col})" if join_table else ""
     print(
-        f"\n👁️ OBSERVATION 1:\n"
+        f"\n OBSERVATION 1:\n"
         f"Sequential Scan terdeteksi pada tabel {table_name}{join_info} ({plan_result['total_rows']:,} baris, "
         f"waktu eksekusi: {plan_result['execution_time_sec']} detik).\n"
         f"Detail Plan: [{plan_result['plan']}]"
@@ -440,9 +449,21 @@ def db_specialist_worker(state: AgentState) -> dict:
         target_pattern = "ORDER BY only"
         desc_cols = f"pengurutan {sort_col}"
 
-    print("\n" + "=" * 75)
+    """
+    SIKLUS 2: Pencarian Aturan di Knowledge 
+
+    THOUGHT 2: 
+    Sequential Scan terjadi pada kolom filter customer_id dan pengurutan created_at. 
+    Saya perlu menggunakan tool pencarian memori/knowledge base untuk mencari aturan indexing.
+
+    ACTION 2: 
+    ExecuteTool(Tool="search_knowledge_base", Input="WHERE equality + ORDER BY sort")
+
+    OBSERVATION 2: 
+    Aturan ditemukan: 'Gunakan B-Tree Composite Index dengan urutan (equality_column, sort_column DESC)'.
+    """
     print("SIKLUS 2: Pencarian Aturan di Knowledge Base (Database Specialist Worker)")
-    print("=" * 75)
+
     print(
         f' THOUGHT 2:\n"Sequential Scan terjadi pada {desc_cols}. '
         f'Saya perlu menggunakan tool pencarian memori/knowledge base untuk mencari aturan indexing."'
@@ -452,13 +473,13 @@ def db_specialist_worker(state: AgentState) -> dict:
     initial_query = re.sub(r"\s+", " ", initial_query)
     attempts.append(initial_query)
 
-    print(f'\n🛠️ ACTION 2 (Percobaan 1):\nExecuteTool(Tool="search_knowledge_base", Input="{initial_query}")')
+    print(f'\n ACTION 2 (Percobaan 1):\nExecuteTool(Tool="search_knowledge_base", Input="{initial_query}")')
     res_1 = search_knowledge_base(initial_query)
-    print(f"\n👁️ OBSERVATION 2A:\nStatus: {res_1['status']} -> {res_1.get('message')}")
+    print(f"\n OBSERVATION 2A:\nStatus: {res_1['status']} -> {res_1.get('message')}")
 
     if res_1["status"] == "NOT_FOUND":
         print(
-            f'\n🔄 SELF-CORRECTION (Query Rewriting):\n'
+            f'\n SELF-CORRECTION (Query Rewriting):\n'
             f'"Pencarian awal NOT_FOUND. Melakukan Query Rewriting ke pola konseptual: {target_pattern}."'
         )
         try:
@@ -474,28 +495,40 @@ def db_specialist_worker(state: AgentState) -> dict:
             refined_query = target_pattern
 
         attempts.append(refined_query)
-        print(f'\n🛠️ ACTION 2 (Percobaan 2 - Query Rewriting):\nExecuteTool(Tool="search_knowledge_base", Input="{refined_query}")')
+        print(f'\n ACTION 2 (Percobaan 2 - Query Rewriting):\nExecuteTool(Tool="search_knowledge_base", Input="{refined_query}")')
         res_2 = search_knowledge_base(refined_query)
-        print(f"\n👁️ OBSERVATION 2B:\nAturan ditemukan [{res_2['doc_id']}]: '{res_2['rule']}'")
+        print(f"\n OBSERVATION 2B:\nAturan ditemukan [{res_2['doc_id']}]: '{res_2['rule']}'")
 
         return {"rag_attempts": attempts, "rag_status": res_2["status"], "rag_rule": res_2["rule"]}
 
     return {"rag_attempts": attempts, "rag_status": res_1["status"], "rag_rule": res_1["rule"]}
 
+"""
+    SIKLUS 3: Refactoring SQL & Pembuatan Perintah DDL
+
+    THOUGHT 3: 
+    Berdasarkan hasil observasi knowledge base, saya akan menyusun DDL CREATE INDEX 
+    dan merefaktor klausa SQL agar lebih efisien.
+
+    ACTION 3: 
+    ExecuteTool(Tool="generate_ddl_and_sql", Input="idx_orders_cust_date")
+
+    OBSERVATION 3: 
+    Draf DDL 'CREATE INDEX idx_orders_cust_date ON orders(customer_id, created_at DESC);' selesai dibuat.
+
+"""
 
 def sql_refactor_worker(state: AgentState) -> dict:
     clauses = state["parsed_clauses"]
     gen_result = generate_ddl_and_sql(raw_sql=state["raw_sql"], parsed=clauses)
     index_name = gen_result["index_name"]
 
-    print("\n" + "=" * 75)
     print("SIKLUS 3: Refactoring SQL & Pembuatan Perintah DDL (SQL Refactor Worker)")
-    print("=" * 75)
-    print('🧠 THOUGHT 3:\n"Berdasarkan hasil observasi knowledge base, saya akan menyusun DDL CREATE INDEX dan merefaktor klausa SQL agar lebih efisien."')
-    print(f'\n🛠️ ACTION 3:\nExecuteTool(Tool="generate_ddl_and_sql", Input="{index_name}")')
+    print(' THOUGHT 3:\n"Berdasarkan hasil observasi knowledge base, saya akan menyusun DDL CREATE INDEX dan merefaktor klausa SQL agar lebih efisien."')
+    print(f'\n ACTION 3:\nExecuteTool(Tool="generate_ddl_and_sql", Input="{index_name}")')
 
     print(
-        f"\n👁️ OBSERVATION 3:\n"
+        f"\n OBSERVATION 3:\n"
         f"Draf DDL '{gen_result['ddl_statement']}' selesai dibuat.\n"
         f"Refactored SQL: '{gen_result['refactored_sql']}'"
     )
@@ -507,6 +540,19 @@ def sql_refactor_worker(state: AgentState) -> dict:
     }
 
 
+"""
+SIKLUS 4: Verifikasi & Eksekusi Akhir
+
+THOUGHT 4: 
+"Draf DDL sudah siap. Setelah dikonfirmasi, saya akan mengeksekusi DDL ke server database."
+
+ACTION 4: 
+ExecuteTool(Tool="execute_db_ddl", Input="CREATE INDEX idx_orders_cust_date...")
+
+FINAL ANSWER: 
+Indeks berhasil dibuat. Waktu eksekusi query turun dari x.x detik menjadi x.xx detik.
+"""
+
 def execute_index_node(state: AgentState) -> dict:
     ddl = state["ddl_statement"]
     index_name = state["index_name"]
@@ -514,11 +560,11 @@ def execute_index_node(state: AgentState) -> dict:
     table_name = state["parsed_clauses"]["table"]
     before_time = state["explain_before"]["execution_time_sec"]
 
-    print("\n" + "=" * 75)
+
     print("SIKLUS 4: Verifikasi & Eksekusi Akhir (Execute Index Node)")
-    print("=" * 75)
-    print('🧠 THOUGHT 4:\n"Draf DDL sudah siap. Setelah dikonfirmasi, saya akan mengeksekusi DDL ke server database dan memverifikasi performanya."')
-    print(f'\n🛠️ ACTION 4:\nExecuteTool(Tool="execute_db_ddl", Input="{ddl}")')
+  
+    print(' THOUGHT 4:\n"Draf DDL sudah siap. Setelah dikonfirmasi, saya akan mengeksekusi DDL ke server database dan memverifikasi performanya."')
+    print(f'\n ACTION 4:\nExecuteTool(Tool="execute_db_ddl", Input="{ddl}")')
 
     execute_db_ddl(ddl)
     after_plan = get_explain_plan(refactored_sql, main_table=table_name)
@@ -529,7 +575,7 @@ def execute_index_node(state: AgentState) -> dict:
         rollback_ddl = f"DROP INDEX IF EXISTS {index_name};"
         execute_db_ddl(rollback_ddl)
         final_msg = (
-            f"⚠️ REGRESI TERDETEKSI: Waktu eksekusi berubah dari {before_time} detik menjadi {after_time} detik "
+            f"  REGRESI TERDETEKSI: Waktu eksekusi berubah dari {before_time} detik menjadi {after_time} detik "
             f"(tidak lebih cepat, kemungkinan karena selektivitas kolom rendah).\n"
             f"   • Self-Correction : Melakukan Auto-Rollback ({rollback_ddl}) untuk menjaga performa database."
         )
@@ -542,7 +588,7 @@ def execute_index_node(state: AgentState) -> dict:
             f"   • Plan Sesudah   : {after_plan['plan']}"
         )
 
-    print(f"\n👁️ FINAL ANSWER:\n{final_msg}\n")
+    print(f"\n FINAL ANSWER:\n{final_msg}\n")
 
     return {
         "approval_status": "APPROVED",
@@ -550,10 +596,8 @@ def execute_index_node(state: AgentState) -> dict:
         "final_answer": final_msg
     }
 
-
-# ==============================================================================
 # 6. LANGGRAPH BUILDER & RUNNER
-# ==============================================================================
+
 def build_optimizer_graph():
     workflow = StateGraph(AgentState)
     workflow.add_node("supervisor", supervisor_node)
@@ -594,7 +638,7 @@ def run_optimizer(sql_query: str, thread_id: str):
 
     is_valid, msg = input_guardrail(sql_query)
     if not is_valid:
-        print(f"🛑 [GUARDRAIL BLOCKED] {msg}\n")
+        print(f" [GUARDRAIL BLOCKED] {msg}\n")
         return
 
     app = build_optimizer_graph()
@@ -622,7 +666,7 @@ def run_optimizer(sql_query: str, thread_id: str):
     snapshot = app.get_state(config)
     if snapshot.next and "execute_index_node" in snapshot.next:
         vals = snapshot.values
-        print("⏸️  HUMAN-IN-THE-LOOP (HITL) SAFETY GATE TERPICU (interrupt_before)")
+        print(" HUMAN-IN-THE-LOOP (HITL) = Konfirmasi Dulu")
         print(f"Thread ID (MemorySaver) : {thread_id}")
         print(f"Node Ditahan            : {snapshot.next}")
         print(f"Draf DDL                : {vals['ddl_statement']}")
@@ -631,11 +675,11 @@ def run_optimizer(sql_query: str, thread_id: str):
 
         choice = input("Setujui eksekusi DDL CREATE INDEX ke database? (y/n): ").strip().lower()
         if choice == "y":
-            print("\n✅ [DBA APPROVED] Melanjutkan dari state tersimpan...")
+            print("\n [DBA APPROVED] Melanjutkan dari state tersimpan...")
             app.invoke(None, config)
         else:
             app.update_state(config, {"approval_status": "REJECTED"})
-            print("\n❌ [DBA REJECTED] Eksekusi DDL dibatalkan.\n")
+            print("\n [DBA REJECTED] Eksekusi DDL dibatalkan.\n")
 
 
 if __name__ == "__main__":
